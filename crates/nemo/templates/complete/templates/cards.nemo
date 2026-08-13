@@ -13,12 +13,4 @@
       <slot />
     </stack>
   </template>
-
-  <template name="content_page">
-    <panel visible="false">
-      <stack id="inner" direction="vertical" spacing="12" padding="32">
-        <slot />
-      </stack>
-    </panel>
-  </template>
 </templates>

@@ -40,7 +40,14 @@ impl RenderOnce for AppLayout {
             .bg(bg_color)
             .text_color(text_color)
             .child(self.header_bar)
-            .child(self.outlet)
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_h(px(0.))
+                    .child(self.outlet),
+            )
             .when_some(self.footer_bar, |this, footer: Entity<FooterBar>| {
                 this.child(footer)
             })

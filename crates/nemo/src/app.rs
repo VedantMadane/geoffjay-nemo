@@ -1143,7 +1143,9 @@ impl App {
                 let content_region = region("app_content");
                 let footer_region = region("app_footer");
 
-                // Sidenav items (raw — the shell renders them itself).
+                // Sidenav items (raw — the shell renders them itself), plus any
+                // other children (e.g. <nav-link>, <label>) rendered through the
+                // normal path so the shell composes with the router.
                 let sidenav_items: Vec<BuiltComponent> = sidenav_region
                     .as_ref()
                     .map(|nav| {
@@ -1152,6 +1154,17 @@ impl App {
                             .filter_map(|id| components.get(id))
                             .filter(|c| c.component_type == "sidenav_item")
                             .cloned()
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let sidenav_children: Vec<AnyElement> = sidenav_region
+                    .as_ref()
+                    .map(|nav| {
+                        nav.children
+                            .iter()
+                            .filter_map(|id| components.get(id))
+                            .filter(|c| c.component_type != "sidenav_item")
+                            .map(|c| self.render_component(c, components, entity_id, window, cx))
                             .collect()
                     })
                     .unwrap_or_default();
@@ -1170,34 +1183,49 @@ impl App {
                     })
                     .unwrap_or_default();
 
-                let default_target = pages.first().map(|p| p.id.clone()).unwrap_or_default();
-                let active_state = self
-                    .component_states
-                    .get_or_create_selected_value(&component.id, default_target.clone());
-                let active = active_state.lock().unwrap().clone();
-
-                // Render only the active page's body (fall back to the first page).
-                let active_page = pages
-                    .iter()
-                    .find(|p| p.id == active)
-                    .or_else(|| pages.first())
-                    .cloned();
-                let content_children = active_page
-                    .map(|page| self.render_children(&page, components, entity_id, window, cx))
-                    .unwrap_or_default();
+                // With <page> children, drive built-in page switching; otherwise
+                // render the content region as-is (e.g. a <router> owns switching).
+                let (content_children, active_state) = if pages.is_empty() {
+                    let children = content_region
+                        .as_ref()
+                        .map(|content| {
+                            self.render_children(content, components, entity_id, window, cx)
+                        })
+                        .unwrap_or_default();
+                    (children, None)
+                } else {
+                    let default_target = pages.first().map(|p| p.id.clone()).unwrap_or_default();
+                    let state = self
+                        .component_states
+                        .get_or_create_selected_value(&component.id, default_target);
+                    let active = state.lock().unwrap().clone();
+                    // Render only the active page's body (fall back to the first).
+                    let active_page = pages
+                        .iter()
+                        .find(|p| p.id == active)
+                        .or_else(|| pages.first())
+                        .cloned();
+                    let children = active_page
+                        .map(|page| self.render_children(&page, components, entity_id, window, cx))
+                        .unwrap_or_default();
+                    (children, Some(state))
+                };
 
                 let footer_children = footer_region
                     .map(|footer| self.render_children(&footer, components, entity_id, window, cx))
                     .unwrap_or_default();
 
-                AppShell::new(component.clone())
+                let mut shell = AppShell::new(component.clone())
                     .sidenav_items(sidenav_items)
+                    .sidenav_children(sidenav_children)
                     .content_children(content_children)
                     .footer_children(footer_children)
-                    .active_state(active_state)
                     .entity_id(entity_id)
-                    .runtime(Arc::clone(&self.runtime))
-                    .into_any_element()
+                    .runtime(Arc::clone(&self.runtime));
+                if let Some(state) = active_state {
+                    shell = shell.active_state(state);
+                }
+                shell.into_any_element()
             }
             "router" => {
                 let router_id = component.id.clone();

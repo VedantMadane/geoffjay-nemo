@@ -58,6 +58,8 @@ pub fn run(args: ScreenshotArgs) -> Result<()> {
         },
         watch: None,
         size_override,
+        // Screenshots never run the dev panel.
+        dev_mode: false,
     };
 
     // Capture failures inside the async task surface here so the process exits
@@ -76,6 +78,7 @@ pub fn run(args: ScreenshotArgs) -> Result<()> {
             let _ = window.update(cx, |_, w, _| w.refresh());
         }
 
+        let window_any: gpui::AnyWindowHandle = window.into();
         // `render_to_image` reads the window's *last drawn* frame, and
         // data-source values arrive asynchronously and reach the UI only once
         // their bindings are propagated into the layout. In the interactive run
@@ -93,7 +96,29 @@ pub fn run(args: ScreenshotArgs) -> Result<()> {
             // Pump data → binding propagation across the settle window in small
             // slices rather than sleeping it all at once. Each `timer` await
             // yields to the executor, giving the async data sources time to
-            // deliver and letting any refresh-requested redraw actually land.
+            // deliver.
+            //
+            // `render_to_image` reads the window's *last drawn* frame
+            // (`rendered_frame.scene`), and the offscreen capture path does
+            // not reliably run the platform frame-request loop that interactive
+            // apps rely on. Simply calling `refresh()` only marks the window
+            // dirty; nothing draws it. So we must explicitly drive `Window::draw`
+            // ourselves after each data tick, and again right before capture, so
+            // async data bindings and first paint actually land in the PNG
+            // (issue #82).
+            //
+            // We call `Window::draw` explicitly (not just `refresh`) because
+            // the offscreen capture path does not reliably run the platform
+            // frame-request loop, so `refresh` alone would leave the dirty
+            // frame un-drawn and `render_to_image` would capture a stale frame.
+            //
+            // Crucially, we use `AnyWindowHandle::update` (via
+            // `window.into()`) rather than `WindowHandle::update`. The latter
+            // leases the Root entity inside the closure, and `Window::draw` →
+            // `draw_roots` → `view.render` leases it again → double-lease panic.
+            // `AnyWindowHandle::update` passes the `AnyView` without leasing,
+            // so `draw` is free to lease Root itself — exactly what the
+            // platform frame loop does.
             let tick = Duration::from_millis(50);
             let mut remaining = settle;
             loop {
@@ -105,34 +130,43 @@ pub fn run(args: ScreenshotArgs) -> Result<()> {
                     let navigated = rt.apply_pending_navigations();
                     let updated = rt.apply_pending_data_updates();
                     if navigated || updated {
-                        let _ = cx.update(|cx| {
-                            let _ = window.update(cx, |_, w, _| w.refresh());
-                        });
+                        let _ = window_any.update(cx, |_, w, _| w.refresh());
                     }
                 }
+
+                // Explicitly draw so the dirty frame is committed into
+                // `rendered_frame`, regardless of whether the platform frame
+                // loop fired during the timer yield.
+                let _ = window_any.update(cx, |_, w, cx| {
+                    let arena_clear_needed = w.draw(cx);
+                    arena_clear_needed.clear();
+                });
 
                 if remaining.is_zero() {
                     break;
                 }
             }
 
-            // Ensure the last-applied state is committed to the drawn frame
-            // before we read it back: refresh, then yield once more so gpui
-            // draws the dirty window into `rendered_frame`.
-            let _ = cx.update(|cx| {
-                let _ = window.update(cx, |_, w, _| w.refresh());
-            });
+            // Final refresh + explicit draw so the last-applied state is
+            // committed to `rendered_frame` before we read it back via
+            // `render_to_image`.
+            let _ = window_any.update(cx, |_, w, _| w.refresh());
             cx.background_executor().timer(tick).await;
-
-            let result: Result<()> = cx.update(|cx| {
-                let img = window
-                    .update(cx, |_, w, _| w.render_to_image())
-                    .context("window closed before capture")?
-                    .context("failed to render window to image")?;
-                img.save(&out)
-                    .with_context(|| format!("failed to write {}", out.display()))?;
-                Ok(())
+            let _ = window_any.update(cx, |_, w, cx| {
+                let arena_clear_needed = w.draw(cx);
+                arena_clear_needed.clear();
             });
+
+            let result: Result<()> = window_any
+                .update(cx, |_, w, _| {
+                    w.render_to_image()
+                        .context("failed to render window to image")
+                })
+                .and_then(std::convert::identity)
+                .and_then(|img| {
+                    img.save(&out)
+                        .with_context(|| format!("failed to write {}", out.display()))
+                });
 
             if let Err(e) = result {
                 *capture_err_task.lock().unwrap() = Some(format!("{e:#}"));

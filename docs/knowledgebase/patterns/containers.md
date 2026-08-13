@@ -46,11 +46,22 @@ The first container. A standard app frame:
 # Slot-region routing
 
 Regions are found by type, not position: the container filters
-`component.children` for `app_sidenav`/`app_content`/`app_footer`, then filters
-each region's children for its leaf type (`sidenav_item`, `page`). Only the
-active page's body is rendered (via `render_children`); the footer's children are
+`component.children` for `app_sidenav`/`app_content`/`app_footer`. The sidenav
+renders its `<sidenav-item>`s with the shell's own icon/label/active styling and
+renders **any other children generically** (so `<nav-link>`s and `<label>`s work
+there too). The content region uses built-in page switching **only when it has
+`<page>` children** — the active page's body is rendered via `render_children`;
+otherwise it renders its children as-is. The footer's children are always
 rendered generically. This is the typed
 [parent-rendered child components](parent-rendered-child-components.md) pattern.
+
+# Composing with a router
+
+Because the sidenav renders arbitrary children and the content region renders
+its children as-is when there are no `<page>`s, `app-shell` composes with the
+[router](routing.md): put a `<router>` in `<app-content>` and drive it with
+`<nav-link>`s in `<app-sidenav>` to get URL-style routes/params/history instead
+of built-in page switching. `examples/complete/` uses exactly this shape.
 
 # Active-page state
 

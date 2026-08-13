@@ -15,6 +15,27 @@ use crate::theme::tokens::{radius_of, FontSize, Space, TokenStyled};
 /// `<sidenav-item target="pageX">` shows the matching `<page id="pageX">` and
 /// highlights the active item — page switching is built in and needs no script.
 ///
+/// # Composing with a router
+///
+/// The shell is chrome-only around two slots: the sidenav renders any children
+/// (not just `<sidenav-item>`s), and the content region renders its children
+/// as-is whenever it has no `<page>`s. So an app can drop a `<router>` into
+/// `<app-content>` and drive it with `<nav-link>`s in `<app-sidenav>`, getting
+/// URL-style routes/params/history instead of built-in page switching:
+///
+/// ```xml
+/// <app-shell sidenav-width="220">
+///   <app-sidenav>
+///     <nav-link router="main" route="/overview" label="Overview"/>
+///   </app-sidenav>
+///   <app-content>
+///     <router id="main" default="/overview" primary="true" flex="1">
+///       <route path="/overview"><!-- ... --></route>
+///     </router>
+///   </app-content>
+/// </app-shell>
+/// ```
+///
 /// # XML Configuration
 ///
 /// ```xml
@@ -44,6 +65,9 @@ pub struct AppShell {
     source: BuiltComponent,
     /// Raw `sidenav_item` BuiltComponents; rendered by the shell itself.
     sidenav_items: Vec<BuiltComponent>,
+    /// Pre-rendered non-item sidenav children (e.g. `<nav-link>`, `<label>`),
+    /// rendered below the items so the shell composes with the router.
+    sidenav_children: Vec<AnyElement>,
     /// Pre-rendered body of the currently active page.
     content_children: Vec<AnyElement>,
     /// Pre-rendered footer children.
@@ -59,6 +83,7 @@ impl AppShell {
         Self {
             source,
             sidenav_items: Vec::new(),
+            sidenav_children: Vec::new(),
             content_children: Vec::new(),
             footer_children: Vec::new(),
             active_state: Arc::new(Mutex::new(String::new())),
@@ -69,6 +94,11 @@ impl AppShell {
 
     pub fn sidenav_items(mut self, items: Vec<BuiltComponent>) -> Self {
         self.sidenav_items = items;
+        self
+    }
+
+    pub fn sidenav_children(mut self, children: Vec<AnyElement>) -> Self {
+        self.sidenav_children = children;
         self
     }
 
@@ -206,7 +236,8 @@ impl RenderOnce for AppShell {
             .border_color(sidebar_border)
             .py_t(Space::Sm)
             .gap_t(Space::Xs)
-            .children(items);
+            .children(items)
+            .children(self.sidenav_children);
 
         // ── Content region ────────────────────────────────────────────────
         let content = div()

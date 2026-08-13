@@ -69,8 +69,6 @@ static TEMPLATES: &[Template] = &[
         files: &[
             tfile!("complete/app.nemo"),
             tfile!("complete/scripts/handlers.rhai"),
-            tfile!("complete/scripts/transforms.rhai"),
-            tfile!("complete/templates/nav.nemo"),
             tfile!("complete/templates/cards.nemo"),
             tfile!("complete/templates/data.nemo"),
         ],

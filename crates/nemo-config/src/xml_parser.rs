@@ -3490,11 +3490,15 @@ mod tests {
         assert!(value.get("scripts").is_some());
         assert!(value.get("layout").is_some());
         assert!(value.get("data").is_some());
+        // The layout root is now the <app-shell> container (flattened SFC root).
+        assert_eq!(
+            value.get("layout").and_then(|l| l.get("type")),
+            Some(&Value::String("app_shell".to_string()))
+        );
 
-        // Verify templates from included files were merged
+        // Verify templates from the included cards.nemo fragment were merged.
         let templates = value.get("templates").unwrap();
         let template = templates.get("template").unwrap();
-        assert!(template.get("nav_item").is_some());
         assert!(template.get("status_card").is_some());
         assert!(template.get("metric_display").is_some());
     }

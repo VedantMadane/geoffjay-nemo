@@ -744,7 +744,7 @@ impl NemoRuntime {
 
         let layout_config = {
             let config = self.config.read().expect("config lock poisoned");
-            parse_layout_config(&config, &extra_templates)
+            parse_layout_config(&config, &extra_templates, Some(&self.registry))
         };
 
         if let Some(layout_config) = layout_config {
@@ -2684,7 +2684,11 @@ fn apply_style_rules(node: &Value, id: Option<&str>, rules: &[StyleRule]) -> Val
 /// `extra_templates` are templates registered by native plugins, merged
 /// with any templates defined in the XML config. Plugin templates are
 /// added first so XML-defined templates can override them.
-fn parse_layout_config(config: &Value, extra_templates: &TemplateMap) -> Option<LayoutConfig> {
+fn parse_layout_config(
+    config: &Value,
+    extra_templates: &TemplateMap,
+    registry: Option<&ComponentRegistry>,
+) -> Option<LayoutConfig> {
     let layout = config.get("layout")?;
     let mut templates = extract_templates(config);
 
@@ -2753,49 +2757,50 @@ fn parse_layout_config(config: &Value, extra_templates: &TemplateMap) -> Option<
         .unwrap_or(LayoutType::Stack);
 
     // Parse root node - the layout block itself acts as a container
-    let root = parse_layout_node_as_root(&expanded_layout, &layout_type)?;
+    let root = parse_layout_node_as_root(&expanded_layout, &layout_type, registry)?;
 
     Some(LayoutConfig::new(layout_type, root))
 }
 
 /// Parses the layout block as the root node, extracting components as children.
-fn parse_layout_node_as_root(layout: &Value, layout_type: &LayoutType) -> Option<LayoutNode> {
-    // The root node type matches the layout type
-    let root_type = match layout_type {
+///
+/// The `layout` object *is* the flattened root component: after SFC flattening
+/// its `type` is the real root type (`stack`/`panel`/`app_shell`/`router`/…) and
+/// its attributes (`direction`, `spacing`, `padding`, `flex`, …) and children
+/// belong on the root. We parse it like any component so container roots and
+/// root attributes survive — the previous logic hardcoded the root type from the
+/// coarse [`LayoutType`] and copied no attributes, so an `<app-shell>` root
+/// collapsed to a bare stack and a `direction="horizontal"` root lost its
+/// direction (children stacked vertically).
+///
+/// The root `type` is honored only when it names a registered component;
+/// otherwise it falls back to the coarse layout type (so a typo degrades to a
+/// stack rather than failing to build). `registry` is `None` in unit tests that
+/// exercise the coarse-type fallback directly.
+fn parse_layout_node_as_root(
+    layout: &Value,
+    layout_type: &LayoutType,
+    registry: Option<&ComponentRegistry>,
+) -> Option<LayoutNode> {
+    let fallback = match layout_type {
         LayoutType::Stack => "stack",
         LayoutType::Dock => "dock",
         LayoutType::Grid => "grid",
         LayoutType::Tiles => "tiles",
     };
+    let root_type = layout
+        .get("type")
+        .and_then(|v| v.as_str())
+        .filter(|t| registry.is_some_and(|r| r.has_component(t)))
+        .map(|t| t.to_string())
+        .unwrap_or_else(|| fallback.to_string());
 
-    let mut root = LayoutNode::new(root_type).with_id("__layout_root__");
-
-    // Parse component children from the layout object
-    if let Some(layout_obj) = layout.as_object() {
-        // Components are parsed as:
-        // layout.component = { "header": {...}, "content": {...} }
-        // So we look for the "component" key which is an object of named components
-        if let Some(components) = layout_obj.get("component") {
-            if let Some(comp_obj) = components.as_object() {
-                // Each key is a component ID, value is the component config
-                for (component_id, component_config) in comp_obj {
-                    if let Some(child) =
-                        parse_component_from_value(component_config, Some(component_id))
-                    {
-                        root = root.with_child(child);
-                    }
-                }
-            } else if let Some(comp_arr) = components.as_array() {
-                // Array of anonymous components
-                for item in comp_arr {
-                    if let Some(child) = parse_component_from_value(item, None) {
-                        root = root.with_child(child);
-                    }
-                }
-            }
-        }
-    }
-
+    // Parse the layout object as a component (attributes, children, handlers,
+    // bindings), then pin the resolved root type + synthetic root id.
+    let mut root = parse_component_from_value(layout, Some("__layout_root__"))
+        .unwrap_or_else(|| LayoutNode::new(&root_type));
+    root.component_type = root_type;
+    root.id = Some("__layout_root__".to_string());
     Some(root)
 }
 
@@ -3407,7 +3412,7 @@ mod sfc_tests {
     #[test]
     fn test_sfc_multi_instance_id_scoping_and_slots() {
         let config = sfc_config();
-        let layout = parse_layout_config(&config, &TemplateMap::new()).expect("layout");
+        let layout = parse_layout_config(&config, &TemplateMap::new(), None).expect("layout");
         let root = layout.root;
 
         // Two cards + one button.
@@ -3480,7 +3485,7 @@ mod sfc_tests {
             ),
         ]);
 
-        let layout = parse_layout_config(&config, &TemplateMap::new()).expect("layout");
+        let layout = parse_layout_config(&config, &TemplateMap::new(), None).expect("layout");
         let labels: Vec<Option<String>> = layout
             .root
             .children
@@ -3539,7 +3544,7 @@ mod sfc_tests {
             ),
         ]);
 
-        let layout = parse_layout_config(&config, &TemplateMap::new()).expect("layout");
+        let layout = parse_layout_config(&config, &TemplateMap::new(), None).expect("layout");
         let panel = &layout.root.children[0];
         assert_eq!(panel.component_type, "panel");
 
@@ -3635,7 +3640,7 @@ mod sfc_tests {
             ),
         ]);
 
-        let layout = parse_layout_config(&config, &TemplateMap::new()).expect("layout");
+        let layout = parse_layout_config(&config, &TemplateMap::new(), None).expect("layout");
         let panel = layout
             .root
             .children
@@ -3682,7 +3687,7 @@ mod sfc_tests {
     #[test]
     fn test_sfc_interpolation_and_scoped_handler() {
         let config = sfc_config();
-        let layout = parse_layout_config(&config, &TemplateMap::new()).expect("layout");
+        let layout = parse_layout_config(&config, &TemplateMap::new(), None).expect("layout");
 
         let button = layout
             .root
@@ -4055,7 +4060,7 @@ mod runtime_tests {
                 ),
             ]),
         )]);
-        let layout = parse_layout_config(&config, &TemplateMap::new()).unwrap();
+        let layout = parse_layout_config(&config, &TemplateMap::new(), None).unwrap();
         assert_eq!(layout.root.children.len(), 1);
         assert_eq!(layout.root.children[0].component_type, "button");
     }
@@ -4063,14 +4068,14 @@ mod runtime_tests {
     #[test]
     fn test_parse_layout_config_dock() {
         let config = obj(vec![("layout", obj(vec![("type", s("dock"))]))]);
-        let layout = parse_layout_config(&config, &TemplateMap::new()).unwrap();
+        let layout = parse_layout_config(&config, &TemplateMap::new(), None).unwrap();
         assert_eq!(layout.root.component_type, "dock");
     }
 
     #[test]
     fn test_parse_layout_config_missing() {
         let config = obj(vec![("app", obj(vec![]))]);
-        assert!(parse_layout_config(&config, &TemplateMap::new()).is_none());
+        assert!(parse_layout_config(&config, &TemplateMap::new(), None).is_none());
     }
 
     #[test]
@@ -4088,7 +4093,7 @@ mod runtime_tests {
                 ),
             ]),
         )]);
-        let layout = parse_layout_config(&config, &TemplateMap::new()).unwrap();
+        let layout = parse_layout_config(&config, &TemplateMap::new(), None).unwrap();
         let btn = &layout.root.children[0];
         assert_eq!(
             btn.handlers.get("click").map(|s| s.as_str()),
@@ -4114,7 +4119,7 @@ mod runtime_tests {
                 ),
             ]),
         )]);
-        let layout = parse_layout_config(&config, &TemplateMap::new()).unwrap();
+        let layout = parse_layout_config(&config, &TemplateMap::new(), None).unwrap();
         let lbl = &layout.root.children[0];
         assert_eq!(lbl.config.bindings.len(), 1);
         assert_eq!(lbl.config.bindings[0].source, "data.sensors.temperature");
@@ -4809,7 +4814,7 @@ mod template_tests_continued {
             ),
         ]);
         let layout_config =
-            parse_layout_config(&config, &TemplateMap::new()).expect("Layout parse failed");
+            parse_layout_config(&config, &TemplateMap::new(), None).expect("Layout parse failed");
         let root = &layout_config.root;
 
         // page_a's inner child should be "page_a_inner"
@@ -4854,7 +4859,7 @@ mod template_tests_continued {
             ),
         ]);
         let layout_config =
-            parse_layout_config(&config, &TemplateMap::new()).expect("Layout parse failed");
+            parse_layout_config(&config, &TemplateMap::new(), None).expect("Layout parse failed");
 
         let nav = &layout_config.root.children[0];
         assert_eq!(
@@ -4936,7 +4941,7 @@ mod template_tests_continued {
             ),
         ]);
         let layout_config =
-            parse_layout_config(&config, &TemplateMap::new()).expect("Layout parse failed");
+            parse_layout_config(&config, &TemplateMap::new(), None).expect("Layout parse failed");
 
         // nav_btn should be a ghost button with label
         let root = &layout_config.root;
@@ -5425,35 +5430,35 @@ mod error_path_tests {
     #[test]
     fn test_parse_layout_config_unknown_type_defaults_to_stack() {
         let config = obj(vec![("layout", obj(vec![("type", s("foobar"))]))]);
-        let layout = parse_layout_config(&config, &TemplateMap::new()).unwrap();
+        let layout = parse_layout_config(&config, &TemplateMap::new(), None).unwrap();
         assert_eq!(layout.root.component_type, "stack");
     }
 
     #[test]
     fn test_parse_layout_config_missing_type_defaults_to_stack() {
         let config = obj(vec![("layout", obj(vec![]))]);
-        let layout = parse_layout_config(&config, &TemplateMap::new()).unwrap();
+        let layout = parse_layout_config(&config, &TemplateMap::new(), None).unwrap();
         assert_eq!(layout.root.component_type, "stack");
     }
 
     #[test]
     fn test_parse_layout_config_grid_type() {
         let config = obj(vec![("layout", obj(vec![("type", s("grid"))]))]);
-        let layout = parse_layout_config(&config, &TemplateMap::new()).unwrap();
+        let layout = parse_layout_config(&config, &TemplateMap::new(), None).unwrap();
         assert_eq!(layout.root.component_type, "grid");
     }
 
     #[test]
     fn test_parse_layout_config_tiles_type() {
         let config = obj(vec![("layout", obj(vec![("type", s("tiles"))]))]);
-        let layout = parse_layout_config(&config, &TemplateMap::new()).unwrap();
+        let layout = parse_layout_config(&config, &TemplateMap::new(), None).unwrap();
         assert_eq!(layout.root.component_type, "tiles");
     }
 
     #[test]
     fn test_parse_layout_config_no_layout_key() {
         let config = obj(vec![("app", obj(vec![("title", s("Test"))]))]);
-        assert!(parse_layout_config(&config, &TemplateMap::new()).is_none());
+        assert!(parse_layout_config(&config, &TemplateMap::new(), None).is_none());
     }
 
     #[test]
@@ -5486,7 +5491,7 @@ mod error_path_tests {
             ),
         ]);
         // Should not panic — falls back to raw layout on expansion failure
-        let layout = parse_layout_config(&config, &TemplateMap::new());
+        let layout = parse_layout_config(&config, &TemplateMap::new(), None);
         assert!(layout.is_some());
     }
 
@@ -5541,7 +5546,7 @@ mod error_path_tests {
 
         let config = nemo_config::XmlParser::new().parse(xml).unwrap();
         let layout_config =
-            parse_layout_config(&config, &TemplateMap::new()).expect("layout should parse");
+            parse_layout_config(&config, &TemplateMap::new(), None).expect("layout should parse");
 
         let registry = Arc::new(ComponentRegistry::new());
         register_all_builtins(&registry);
@@ -6299,7 +6304,7 @@ mod control_flow_directive_tests {
         let config = loader
             .load_xml_string(xml, "test.xml", None)
             .expect("config should load");
-        let layout = parse_layout_config(&config, &TemplateMap::new()).expect("layout");
+        let layout = parse_layout_config(&config, &TemplateMap::new(), None).expect("layout");
         let registry = Arc::new(ComponentRegistry::new());
         register_all_builtins(&registry);
         let mut manager = LayoutManager::new(registry);
@@ -6370,7 +6375,7 @@ mod control_flow_directive_tests {
         let config = loader
             .load_xml_string(xml, "test.xml", None)
             .expect("config loads");
-        let layout = parse_layout_config(&config, &TemplateMap::new()).expect("layout");
+        let layout = parse_layout_config(&config, &TemplateMap::new(), None).expect("layout");
         let labels: Vec<String> = layout
             .root
             .children
